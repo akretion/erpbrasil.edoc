@@ -211,6 +211,11 @@ class DocumentoEletronico(ABC):
         # return datetime.today().strftime(FORMAT) + '-00:00'
         return time.strftime(FORMAT, time.localtime()) + '-00:00'
 
+#    def _data_agora(self):
+#        FORMAT = '%Y-%m-%d'
+#        # return datetime.today().strftime(FORMAT) + '-00:00'
+#        return time.strftime(FORMAT, time.localtime())
+
     def assina_raiz(self, raiz, id):
         xml_string, xml_etree = self._generateds_to_string_etree(raiz)
         xml_assinado = Assinatura(self._transmissao.certificado).assina_xml2(
