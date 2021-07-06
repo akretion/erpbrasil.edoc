@@ -7,6 +7,8 @@ from __future__ import unicode_literals
 
 import collections
 import datetime
+from io import StringIO
+import os
 import time
 
 from lxml import etree
@@ -793,6 +795,14 @@ class NFe(DocumentoEletronico):
         :return:
         """
         xml_assinado = self.assina_raiz(edoc, edoc.infNFe.Id)
+
+        import nfelib
+        path = os.path.join(nfelib.__path__[0], '..', 'schemas', 'nfe',
+                'v4_00', 'nfe_v4.00.xsd')
+        xmlschema_doc = etree.parse(path)
+        xmlschema = etree.XMLSchema(xmlschema_doc)
+        doc_assinado = etree.parse(StringIO(xml_assinado))
+        xmlschema.assertValid(doc_assinado)
 
         raiz = retEnviNFe.TEnviNFe(
             versao=self.versao,
