@@ -724,16 +724,27 @@ METODO_WS = {
 
 
 class NFe(DocumentoEletronico):
-    _namespace = 'http://www.portalfiscal.inf.br/nfe'
-    _edoc_situacao_arquivo_recebido_com_sucesso = '103'
-    _edoc_situacao_servico_em_operacao = '107'
-    _consulta_servico_ao_enviar = True
-    _consulta_documento_antes_de_enviar = True
+    _namespace = "http://www.portalfiscal.inf.br/nfe"
+    _edoc_situacao_arquivo_recebido_com_sucesso = "103"
+    _edoc_situacao_arquivo_processado_com_sucesso = "104"
+    _edoc_situacao_servico_em_operacao = "107"
+
+    # Desativado por padrão para evitar 'consumo indevido'
+    _consulta_servico_ao_enviar = False
+    _consulta_documento_antes_de_enviar = False
+
     _maximo_tentativas_consulta_recibo = 5
 
-    def __init__(self, transmissao, uf, versao='4.00', ambiente='2',
-                 mod='55'):
-        super(NFe, self).__init__(transmissao)
+    def __init__(
+        self,
+        transmissao,
+        uf,
+        versao="4.00",
+        ambiente="2",
+        mod="55",
+        envio_sincrono=False,
+    ):
+        super().__init__(transmissao, envio_sincrono)
         self.versao = str(versao)
         self.ambiente = str(ambiente)
         self.uf = int(uf)
@@ -765,6 +776,7 @@ class NFe(DocumentoEletronico):
         )
 
     def consulta_documento(self, chave):
+        # NfeConsultaProtocolo
         raiz = retConsSitNFe.TConsSitNFe(
             versao=self.versao,
             tpAmb=self.ambiente,
@@ -809,15 +821,11 @@ class NFe(DocumentoEletronico):
         raiz = retEnviNFe.TEnviNFe(
             versao=self.versao,
             idLote=datetime.datetime.now().strftime("%Y%m%d%H%M%S"),
-            indSinc="1" if envio_sincrono else "0",
+            indSinc="1" if self.envio_sincrono else "0",
         )
         raiz.original_tagname_ = "enviNFe"
         xml_envio_string, xml_envio_etree = self._generateds_to_string_etree(raiz)
-
-        for doc in docs:
-            xml_assinado = self.assina_raiz(doc, doc.infNFe.Id)
-            xml_envio_etree.append(etree.fromstring(xml_assinado))
-
+        xml_envio_etree.append(etree.fromstring(xml_assinado))
         return self._post(
             xml_envio_etree,
             self._get_ws_endpoint(WS_NFE_AUTORIZACAO),
@@ -972,13 +980,18 @@ class NFe(DocumentoEletronico):
         return False
 
     def _verifica_resposta_envio_sucesso(self, proc_envio):
-        if proc_envio.resposta.cStat == \
-                self._edoc_situacao_arquivo_recebido_com_sucesso:
-            return True
-        return False
+        """
+        Verifica se a resposta do envio indica sucesso:
+        - cStat "103" = "Lote recebido com sucesso" (assíncrono)
+        - cStat "104" = "Lote processado com sucesso" (síncrono)
+        """
+        return proc_envio.resposta.cStat in [
+            self._edoc_situacao_arquivo_recebido_com_sucesso,
+            self._edoc_situacao_arquivo_processado_com_sucesso,
+        ]
 
     def _aguarda_tempo_medio(self, proc_envio):
-        time.sleep(float(proc_envio.resposta.infRec.tMed) * 1.3)
+        time.sleep(float(proc_envio.resposta.infRec.tMed))
 
     def _edoc_situacao_em_processamento(self, proc_recibo):
         if proc_recibo.resposta.cStat == '105':
@@ -1039,49 +1052,31 @@ class NFe(DocumentoEletronico):
         )
 
     def monta_processo(self, edoc, proc_envio, proc_recibo=None):
+        nfe = proc_envio.envio_raiz.find("{" + self._namespace + "}NFe")
         if proc_recibo:
             protocolos = proc_recibo.resposta.protNFe
         else:
+            # A falta do recibo indica envio no modo síncrono
+            # o protocolo é recuperado diretamente da resposta do envio.
             protocolos = proc_envio.resposta.protNFe
-
-        if not protocolos:
-            return False
-
-        if not isinstance(protocolos, list):
-            protocolos = [protocolos]
-
-        edoc_chave = edoc.infNFe.Id.replace("NFe", "")
-        nfe_element = None
-
-        # Find the NFe element corresponding to the edoc
-        for nfe in proc_envio.envio_raiz.findall(f"{{{self._namespace}}}NFe"):
-            if nfe.find(f"{{{self._namespace}}}infNFe").attrib["Id"].replace(
-                "NFe", ""
-            ) == edoc_chave:
-                nfe_element = nfe
-                break
-
-        if nfe_element is None:
-            return False
-
-        for protocolo in protocolos:
-            if protocolo.infProt.chNFe == edoc_chave:
+        if len(nfe) and protocolos:
+            if not isinstance(protocolos, list):
+                protocolos = [protocolos]
+            for protocolo in protocolos:
                 nfe_proc = retEnviNFe.TNfeProc(
                     versao=self.versao,
                     protNFe=protocolo,
                 )
                 nfe_proc.original_tagname_ = "nfeProc"
-                _, nfe_proc_etree = self._generateds_to_string_etree(nfe_proc)
-                prot_nfe = nfe_proc_etree.find(f"{{{self._namespace}}}protNFe")
-                prot_nfe.addprevious(nfe_element)
+                xml_file, nfe_proc = self._generateds_to_string_etree(nfe_proc)
+                prot_nfe = nfe_proc.find("{" + self._namespace + "}protNFe")
+                prot_nfe.addprevious(nfe)
 
                 proc = proc_recibo if proc_recibo else proc_envio
-                proc.processo = nfe_proc_etree
-                proc.processo_xml = etree.tostring(nfe_proc_etree)
+                proc.processo = nfe_proc
+                proc.processo_xml = self._generateds_to_string_etree(nfe_proc)[0]
                 proc.protocolo = protocolo
-                return True
-
-        return False
+            return True
 
     def monta_nfe_proc(self, nfe, prot_nfe):
         """
