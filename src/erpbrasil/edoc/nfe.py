@@ -783,15 +783,20 @@ class NFe(DocumentoEletronico):
 
     def envia_documento(self, edoc):
         """
-
         Exportar o documento
         Assinar o documento
         Adicionar o mesmo ao envio
-
-        :param edoc:
+        :param edoc: pode ser um objeto único ou uma lista de objetos.
         :return:
         """
-        xml_assinado = self.assina_raiz(edoc, edoc.infNFe.Id)
+        if not isinstance(edoc, list):
+            docs = [edoc]
+        else:
+            docs = edoc
+
+        envio_sincrono = self.envio_sincrono
+        if self.mod == "55" and len(docs) == 1:
+            envio_sincrono = True
 
         import nfelib
         path = os.path.join(nfelib.__path__[0], '..', 'schemas', 'nfe',
@@ -803,24 +808,21 @@ class NFe(DocumentoEletronico):
 
         raiz = retEnviNFe.TEnviNFe(
             versao=self.versao,
-            idLote=datetime.datetime.now().strftime('%Y%m%d%H%M%S'),
-            indSinc='0'
+            idLote=datetime.datetime.now().strftime("%Y%m%d%H%M%S"),
+            indSinc="1" if envio_sincrono else "0",
         )
-        raiz.original_tagname_ = 'enviNFe'
-        xml_envio_string, xml_envio_etree = self._generateds_to_string_etree(
-            raiz
-        )
-        xml_envio_etree.append(etree.fromstring(xml_assinado))
+        raiz.original_tagname_ = "enviNFe"
+        xml_envio_string, xml_envio_etree = self._generateds_to_string_etree(raiz)
 
-        # teste_string, teste_etree = self._generateds_to_string_etree(xml_envio_etree)
+        for doc in docs:
+            xml_assinado = self.assina_raiz(doc, doc.infNFe.Id)
+            xml_envio_etree.append(etree.fromstring(xml_assinado))
 
         return self._post(
             xml_envio_etree,
-            # 'https://hom.sefazvirtual.fazenda.gov.br/NFeAutorizacao4/NFeAutorizacao4.asmx?wsdl',
-            localizar_url(WS_NFE_AUTORIZACAO, str(self.uf), self.mod,
-                          int(self.ambiente)),
-            'nfeAutorizacaoLote',
-            retEnviNFe
+            self._get_ws_endpoint(WS_NFE_AUTORIZACAO),
+            "nfeAutorizacaoLote",
+            retEnviNFe,
         )
 
     def envia_inutilizacao(self, evento):
@@ -1035,3 +1037,90 @@ class NFe(DocumentoEletronico):
             'nfeDistDFeInteresse',
             retDistDFeInt
         )
+
+    def monta_processo(self, edoc, proc_envio, proc_recibo=None):
+        if proc_recibo:
+            protocolos = proc_recibo.resposta.protNFe
+        else:
+            protocolos = proc_envio.resposta.protNFe
+
+        if not protocolos:
+            return False
+
+        if not isinstance(protocolos, list):
+            protocolos = [protocolos]
+
+        edoc_chave = edoc.infNFe.Id.replace("NFe", "")
+        nfe_element = None
+
+        # Find the NFe element corresponding to the edoc
+        for nfe in proc_envio.envio_raiz.findall(f"{{{self._namespace}}}NFe"):
+            if nfe.find(f"{{{self._namespace}}}infNFe").attrib["Id"].replace(
+                "NFe", ""
+            ) == edoc_chave:
+                nfe_element = nfe
+                break
+
+        if nfe_element is None:
+            return False
+
+        for protocolo in protocolos:
+            if protocolo.infProt.chNFe == edoc_chave:
+                nfe_proc = retEnviNFe.TNfeProc(
+                    versao=self.versao,
+                    protNFe=protocolo,
+                )
+                nfe_proc.original_tagname_ = "nfeProc"
+                _, nfe_proc_etree = self._generateds_to_string_etree(nfe_proc)
+                prot_nfe = nfe_proc_etree.find(f"{{{self._namespace}}}protNFe")
+                prot_nfe.addprevious(nfe_element)
+
+                proc = proc_recibo if proc_recibo else proc_envio
+                proc.processo = nfe_proc_etree
+                proc.processo_xml = etree.tostring(nfe_proc_etree)
+                proc.protocolo = protocolo
+                return True
+
+        return False
+
+    def monta_nfe_proc(self, nfe, prot_nfe):
+        """
+        Constrói e retorna o XML do processo da NF-e,
+        incorporando a NF-e com o seu protocolo de autorização.
+        """
+        nfe_proc = etree.Element(
+            f"{{{self._namespace}}}nfeProc",
+            versao=self.versao,
+            nsmap={None: self._namespace},
+        )
+        nfe_proc.append(nfe)
+        nfe_proc.append(prot_nfe)
+        return etree.tostring(nfe_proc)
+
+    def consultar_cadastro(self, uf, cnpj=None, cpf=None, ie=None):
+        if not cnpj and not cpf and not ie:
+            return
+
+        infCons = retConsCad.infConsType(
+            xServ="CONS-CAD",
+            UF=uf,
+            IE=ie,
+            CNPJ=cnpj,
+            CPF=cpf,
+        )
+
+        raiz = retConsCad.TConsCad(
+            versao="2.00",
+            infCons=infCons,
+        )
+        raiz.original_tagname_ = "ConsCad"
+
+        return self._post(
+            raiz,
+            self._get_ws_endpoint(WS_NFE_CADASTRO),
+            "consultaCadastro",
+            retConsCad,
+        )
+
+    def monta_qrcode(self, chave):
+        return
